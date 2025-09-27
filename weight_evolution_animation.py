@@ -151,36 +151,79 @@ class WeightEvolutionVisualizer:
     def record_inference(self):
         print("Recording inference for different digits...")
 
-        with torch.no_grad():
-            for digit in range(10):
-                digit_samples = []
-                for data, target in self.test_loader:
-                    mask = target == digit
-                    if mask.any():
-                        sample = data[mask][0:1].to(self.device)
+        # Switch model to eval mode but keep track of activations
+        self.model.eval()
 
+        # First pass: collect all digit activations and compute baseline
+        all_activations = []
+
+        for digit in range(10):
+            digit_samples = []
+            for data, target in self.test_loader:
+                mask = target == digit
+                if mask.any():
+                    sample = data[mask][0:1].to(self.device)
+
+                    # Forward pass without gradients first
+                    with torch.no_grad():
                         output = self.model(sample)
                         prediction = output.argmax(dim=1).item()
                         probs = F.softmax(output, dim=1).squeeze().cpu().numpy()
 
                         activations = {
-                            'layer1': self.model.activations['layer1'].cpu().numpy(),
-                            'layer2': self.model.activations['layer2'].cpu().numpy(),
+                            'layer1': self.model.activations['layer1'].clone().cpu().numpy(),
+                            'layer2': self.model.activations['layer2'].clone().cpu().numpy(),
                             'output': probs
                         }
 
-                        weights = self.capture_weights()
+                    # Now compute gradients for activation analysis
+                    sample_grad = sample.clone().detach().requires_grad_(True)
+                    output_grad = self.model(sample_grad)
 
-                        self.inference_states[digit] = {
-                            'input': sample.cpu().numpy(),
-                            'weights': weights,
-                            'activations': activations,
-                            'prediction': prediction,
-                            'probabilities': probs
+                    # Compute activation gradients for this specific digit
+                    grad_output = torch.zeros_like(output_grad)
+                    grad_output[0, digit] = 1.0  # Gradient w.r.t. the true digit class
+                    output_grad.backward(gradient=grad_output)
+
+                    input_gradients = sample_grad.grad.clone().cpu().numpy() if sample_grad.grad is not None else None
+
+                    weights = self.capture_weights()
+
+                    self.inference_states[digit] = {
+                        'input': sample.cpu().numpy(),
+                        'weights': weights,
+                        'activations': activations,
+                        'prediction': prediction,
+                        'probabilities': probs,
+                        'input_gradients': input_gradients
+                    }
+
+                    all_activations.append(activations)
+                    break
+
+            # Compute mean activations across all digits (baseline)
+            if all_activations:
+                mean_activations = {
+                    'layer1': np.mean([a['layer1'] for a in all_activations], axis=0),
+                    'layer2': np.mean([a['layer2'] for a in all_activations], axis=0),
+                }
+
+                # Compute differential activations for each digit
+                for digit in range(10):
+                    if digit in self.inference_states:
+                        diff_activations = {
+                            'layer1': self.inference_states[digit]['activations']['layer1'] - mean_activations['layer1'],
+                            'layer2': self.inference_states[digit]['activations']['layer2'] - mean_activations['layer2'],
                         }
-                        break
+                        self.inference_states[digit]['diff_activations'] = diff_activations
 
-        print(f"Recorded inference states for {len(self.inference_states)} digits.")
+                        # Compute activation strengths (which neurons fire most strongly for this digit)
+                        self.inference_states[digit]['activation_strength'] = {
+                            'layer1': np.abs(diff_activations['layer1']).mean(),
+                            'layer2': np.abs(diff_activations['layer2']).mean(),
+                        }
+
+        print(f"Recorded inference states for {len(self.inference_states)} digits with differential analysis.")
 
     def create_interactive_animation(self):
         fig = plt.figure(figsize=(18, 10))
@@ -374,6 +417,147 @@ class WeightEvolutionVisualizer:
 
         plt.suptitle('Neural Network Weight Evolution Animation', fontsize=16, y=0.98)
 
+        return fig
+
+    def create_digit_activation_analysis(self, filename='digit_activation_analysis.png'):
+        """Create visualization showing which parts of network activate for each digit"""
+        print(f"Creating digit activation analysis visualization: {filename}")
+
+        fig = plt.figure(figsize=(24, 18))
+        gs = GridSpec(6, 5, figure=fig, hspace=0.4, wspace=0.3)
+
+        # Title
+        fig.suptitle('Neural Network Digit-Specific Activation Analysis\n(Showing which neurons activate most for each digit)',
+                     fontsize=18, fontweight='bold', y=0.98)
+
+        # Create subplots for each digit
+        for digit in range(10):
+            row = digit // 5 * 3  # 0 or 3
+            col = digit % 5
+
+            if digit in self.inference_states:
+                state = self.inference_states[digit]
+
+                # Input image
+                ax_input = fig.add_subplot(gs[row, col])
+                ax_input.imshow(state['input'].squeeze(), cmap='hot')
+                ax_input.set_title(f'Digit {digit}', fontsize=10, fontweight='bold')
+                ax_input.axis('off')
+
+                # Differential activation heatmap for layer 1
+                if 'diff_activations' in state:
+                    ax_layer1 = fig.add_subplot(gs[row+1, col])
+                    diff_act_1 = state['diff_activations']['layer1'].reshape(-1)
+
+                    # Reshape to square for visualization
+                    size = int(np.sqrt(len(diff_act_1)))
+                    if size * size < len(diff_act_1):
+                        size += 1
+                    padded = np.zeros(size * size)
+                    padded[:len(diff_act_1)] = diff_act_1
+
+                    im1 = ax_layer1.imshow(padded.reshape(size, size), cmap='RdBu_r',
+                                           vmin=-np.abs(diff_act_1).max(),
+                                           vmax=np.abs(diff_act_1).max())
+                    ax_layer1.set_title(f'L1 Diff (±{state["activation_strength"]["layer1"]:.3f})',
+                                        fontsize=9)
+                    ax_layer1.axis('off')
+
+                    # Differential activation heatmap for layer 2
+                    ax_layer2 = fig.add_subplot(gs[row+2, col])
+                    diff_act_2 = state['diff_activations']['layer2'].reshape(-1)
+
+                    size2 = int(np.sqrt(len(diff_act_2)))
+                    if size2 * size2 < len(diff_act_2):
+                        size2 += 1
+                    padded2 = np.zeros(size2 * size2)
+                    padded2[:len(diff_act_2)] = diff_act_2
+
+                    im2 = ax_layer2.imshow(padded2.reshape(size2, size2), cmap='RdBu_r',
+                                           vmin=-np.abs(diff_act_2).max(),
+                                           vmax=np.abs(diff_act_2).max())
+                    ax_layer2.set_title(f'L2 Diff (±{state["activation_strength"]["layer2"]:.3f})',
+                                        fontsize=9)
+                    ax_layer2.axis('off')
+
+        # Add colorbar legend
+        ax_legend = fig.add_subplot(gs[5, :])
+        ax_legend.axis('off')
+        ax_legend.text(0.5, 0.7, 'Red = Higher activation than average | Blue = Lower activation than average',
+                      ha='center', va='center', fontsize=12,
+                      bbox=dict(boxstyle="round,pad=0.3", facecolor='black', alpha=0.5))
+        ax_legend.text(0.5, 0.3, 'Differential values show which neurons specialize for each digit',
+                      ha='center', va='center', fontsize=11, style='italic')
+
+        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='black')
+        print(f"Digit activation analysis saved as {filename}")
+        return fig
+
+    def create_network_specialization_matrix(self, filename='network_specialization.png'):
+        """Create a matrix showing which neurons are most specialized for each digit"""
+        print(f"Creating network specialization matrix: {filename}")
+
+        if not self.inference_states or 'diff_activations' not in self.inference_states[0]:
+            print("No differential activation data available. Run record_inference() first.")
+            return None
+
+        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+        fig.suptitle('Neural Network Specialization Matrix\n(Which neurons fire strongest for each digit)',
+                     fontsize=16, fontweight='bold')
+
+        # Collect all differential activations
+        layer1_diffs = []
+        layer2_diffs = []
+
+        for digit in range(10):
+            if digit in self.inference_states and 'diff_activations' in self.inference_states[digit]:
+                layer1_diffs.append(self.inference_states[digit]['diff_activations']['layer1'].reshape(-1))
+                layer2_diffs.append(self.inference_states[digit]['diff_activations']['layer2'].reshape(-1))
+
+        if layer1_diffs and layer2_diffs:
+            # Create matrices: rows = digits, columns = neurons
+            layer1_matrix = np.array(layer1_diffs)
+            layer2_matrix = np.array(layer2_diffs)
+
+            # Plot Layer 1 specialization
+            im1 = axes[0, 0].imshow(layer1_matrix, cmap='RdBu_r', aspect='auto')
+            axes[0, 0].set_title('Layer 1 Neuron Specialization by Digit')
+            axes[0, 0].set_xlabel('Neuron Index')
+            axes[0, 0].set_ylabel('Digit')
+            axes[0, 0].set_yticks(range(10))
+            plt.colorbar(im1, ax=axes[0, 0])
+
+            # Plot Layer 2 specialization
+            im2 = axes[0, 1].imshow(layer2_matrix, cmap='RdBu_r', aspect='auto')
+            axes[0, 1].set_title('Layer 2 Neuron Specialization by Digit')
+            axes[0, 1].set_xlabel('Neuron Index')
+            axes[0, 1].set_ylabel('Digit')
+            axes[0, 1].set_yticks(range(10))
+            plt.colorbar(im2, ax=axes[0, 1])
+
+            # Compute and plot neuron specialization scores
+            # (which digit each neuron responds to most strongly)
+            layer1_specialization = np.argmax(np.abs(layer1_matrix), axis=0)
+            layer2_specialization = np.argmax(np.abs(layer2_matrix), axis=0)
+
+            # Histogram of which digits dominate each layer
+            axes[1, 0].hist(layer1_specialization, bins=10, alpha=0.7, color='cyan', edgecolor='white')
+            axes[1, 0].set_title('Layer 1: Distribution of Neuron Specialization')
+            axes[1, 0].set_xlabel('Digit that activates neuron most')
+            axes[1, 0].set_ylabel('Number of neurons')
+            axes[1, 0].set_xticks(range(10))
+            axes[1, 0].grid(alpha=0.2)
+
+            axes[1, 1].hist(layer2_specialization, bins=10, alpha=0.7, color='magenta', edgecolor='white')
+            axes[1, 1].set_title('Layer 2: Distribution of Neuron Specialization')
+            axes[1, 1].set_xlabel('Digit that activates neuron most')
+            axes[1, 1].set_ylabel('Number of neurons')
+            axes[1, 1].set_xticks(range(10))
+            axes[1, 1].grid(alpha=0.2)
+
+        plt.tight_layout()
+        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='black')
+        print(f"Network specialization matrix saved as {filename}")
         return fig
 
     def create_all_digits_inference_visualization(self, filename='all_digits_inference.png'):
@@ -710,6 +894,14 @@ def main():
         visualizer.create_all_digits_inference_visualization('all_digits_inference.png')
         print("- all_digits_inference.png (comprehensive inference visualization)")
 
+        print("\nCreating digit-specific activation analysis...")
+        visualizer.create_digit_activation_analysis('digit_activation_analysis.png')
+        print("- digit_activation_analysis.png (digit-specific neuron activation patterns)")
+
+        print("\nCreating network specialization matrix...")
+        visualizer.create_network_specialization_matrix('network_specialization.png')
+        print("- network_specialization.png (neuron specialization by digit)")
+
     print(f"\nGenerating animated GIF (fps={args.fps}, max_frames={args.max_frames})...")
     visualizer.create_gif('weight_evolution.gif', fps=args.fps, max_frames=args.max_frames,
                          include_all_inference=args.all_digits)
@@ -720,6 +912,8 @@ def main():
     print("- weight_evolution.gif (animated GIF)")
     if args.all_digits:
         print("- all_digits_inference.png (all digits inference visualization)")
+        print("- digit_activation_analysis.png (differential activation patterns)")
+        print("- network_specialization.png (neuron specialization matrix)")
 
     plt.show()
 
