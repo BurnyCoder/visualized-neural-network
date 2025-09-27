@@ -376,7 +376,180 @@ class WeightEvolutionVisualizer:
 
         return fig
 
-    def create_gif(self, filename='weight_evolution.gif', fps=10, max_frames=100):
+    def create_all_digits_inference_visualization(self, filename='all_digits_inference.png'):
+        """Create a comprehensive visualization showing inference for all digits 0-9"""
+        print(f"Creating all digits inference visualization: {filename}")
+
+        fig = plt.figure(figsize=(24, 16))
+        gs = GridSpec(5, 6, figure=fig, hspace=0.3, wspace=0.3)
+
+        # Main weight visualization
+        ax_weights = fig.add_subplot(gs[0:2, 0:2])
+
+        # Individual digit visualizations (2 rows: input images and weight images)
+        digit_input_axes = []
+        digit_weight_axes = []
+        for i in range(10):
+            # Input images row
+            row = 2
+            col = i % 5
+            if i >= 5:
+                row = 3
+            ax_input = fig.add_subplot(gs[row, col])
+            digit_input_axes.append(ax_input)
+
+            # Weight images row
+            weight_row = 4
+            weight_col = i % 6
+            ax_weight = fig.add_subplot(gs[weight_row, weight_col])
+            digit_weight_axes.append(ax_weight)
+
+        # Weight distribution
+        ax_dist = fig.add_subplot(gs[0, 2:4])
+
+        # Overall accuracy
+        ax_accuracy = fig.add_subplot(gs[1, 2:4])
+
+        # Legend/info
+        ax_info = fig.add_subplot(gs[0:2, 5])
+        ax_info.axis('off')
+
+        # Display final trained weights
+        if self.weight_history:
+            final_weights = self.weight_history[-1]['weights']
+            weight_img = self.weights_to_image(final_weights)
+
+            vmin, vmax = np.percentile(weight_img, [1, 99])
+            vmax = max(abs(vmin), abs(vmax))
+            vmin = -vmax
+
+            im = ax_weights.imshow(weight_img, cmap='RdBu_r', vmin=vmin, vmax=vmax)
+            ax_weights.set_title('Final Trained Network Weights', fontsize=12, fontweight='bold')
+            ax_weights.axis('off')
+            plt.colorbar(im, ax=ax_weights, fraction=0.046)
+
+        # Plot each digit inference
+        predictions = []
+        confidences = []
+
+        # Collect min/max for consistent color scaling across all weight visualizations
+        all_weight_imgs = []
+        for digit in range(10):
+            if digit in self.inference_states:
+                state = self.inference_states[digit]
+                weight_img = self.weights_to_image(state['weights'])
+                all_weight_imgs.append(weight_img)
+
+        if all_weight_imgs:
+            global_vmin = min(np.min(img) for img in all_weight_imgs)
+            global_vmax = max(np.max(img) for img in all_weight_imgs)
+            global_vmax = max(abs(global_vmin), abs(global_vmax))
+            global_vmin = -global_vmax
+
+        for digit in range(10):
+            ax_input = digit_input_axes[digit]
+            ax_weight = digit_weight_axes[digit]
+
+            if digit in self.inference_states:
+                state = self.inference_states[digit]
+
+                # Show input image
+                ax_input.imshow(state['input'].squeeze(), cmap='hot')
+
+                pred = state['prediction']
+                conf = state['probabilities'][pred]
+                predictions.append(pred)
+                confidences.append(conf)
+
+                # Color code based on correctness
+                color = 'green' if pred == digit else 'red'
+                ax_input.set_title(f'True: {digit}\nPred: {pred} ({conf:.2%})',
+                                  color=color, fontsize=10, fontweight='bold')
+                ax_input.axis('off')
+
+                # Add border to highlight incorrect predictions
+                if pred != digit:
+                    for spine in ax_input.spines.values():
+                        spine.set_edgecolor('red')
+                        spine.set_linewidth(3)
+
+                # Show weight image for this digit's inference
+                weight_img = self.weights_to_image(state['weights'])
+                ax_weight.imshow(weight_img, cmap='RdBu_r', vmin=global_vmin, vmax=global_vmax)
+                ax_weight.set_title(f'Weights for {digit}', fontsize=9)
+                ax_weight.axis('off')
+
+        # Weight distribution histogram
+        if self.weight_history:
+            all_weights = np.concatenate([
+                final_weights['fc1'].flatten(),
+                final_weights['fc2'].flatten(),
+                final_weights['fc3'].flatten()
+            ])
+
+            ax_dist.hist(all_weights, bins=50, alpha=0.7, color='magenta', edgecolor='white')
+            ax_dist.set_title('Final Weight Distribution', fontsize=12)
+            ax_dist.set_xlabel('Weight Value')
+            ax_dist.set_ylabel('Count')
+            ax_dist.grid(alpha=0.2)
+
+            ax_dist.axvline(np.mean(all_weights), color='cyan', linestyle='--',
+                           label=f'Mean: {np.mean(all_weights):.3f}')
+            ax_dist.axvline(np.median(all_weights), color='yellow', linestyle='--',
+                           label=f'Median: {np.median(all_weights):.3f}')
+            ax_dist.legend()
+
+        # Accuracy bar chart
+        correct_predictions = sum(1 for i, pred in enumerate(predictions) if i == pred)
+        accuracy = correct_predictions / len(predictions) if predictions else 0
+
+        colors = ['green' if i == predictions[i] else 'red'
+                 for i in range(len(predictions))] if predictions else []
+
+        if predictions:
+            bars = ax_accuracy.bar(range(len(predictions)), confidences, color=colors)
+            ax_accuracy.set_title(f'Prediction Confidence (Accuracy: {accuracy:.1%})', fontsize=12)
+            ax_accuracy.set_xlabel('Digit')
+            ax_accuracy.set_ylabel('Confidence')
+            ax_accuracy.set_ylim(0, 1)
+            ax_accuracy.set_xticks(range(10))
+            ax_accuracy.grid(alpha=0.2, axis='y')
+
+            # Add accuracy line
+            ax_accuracy.axhline(y=accuracy, color='white', linestyle='--',
+                              alpha=0.5, label=f'Overall Acc: {accuracy:.1%}')
+            ax_accuracy.legend()
+
+        # Info panel
+        info_text = f"""Network Architecture:
+Input: 784 neurons
+Hidden 1: {self.hidden1_size} neurons
+Hidden 2: {self.hidden2_size} neurons
+Output: 10 classes
+
+Training Summary:
+Total Steps: {len(self.weight_history)}
+Final Loss: {self.loss_history[-1]:.4f}
+Final Accuracy: {self.accuracy_history[-1]:.2%}
+
+Inference Results:
+Correct: {correct_predictions}/10
+Accuracy: {accuracy:.1%}
+Avg Confidence: {np.mean(confidences):.2%}"""
+
+        ax_info.text(0.1, 0.5, info_text, fontsize=10, verticalalignment='center',
+                    family='monospace', bbox=dict(boxstyle="round,pad=0.3",
+                    facecolor='black', alpha=0.5))
+
+        plt.suptitle('Neural Network All-Digits Inference with Weight Visualization',
+                    fontsize=16, fontweight='bold', y=0.98)
+
+        plt.savefig(filename, dpi=150, bbox_inches='tight', facecolor='black')
+        print(f"All digits inference visualization saved as {filename}")
+
+        return fig
+
+    def create_gif(self, filename='weight_evolution.gif', fps=10, max_frames=100, include_all_inference=False):
         print(f"Creating GIF animation: {filename}")
 
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -462,9 +635,35 @@ class WeightEvolutionVisualizer:
                     fig.suptitle(f'Inference - Digit {digit_idx}, Prediction: {state["prediction"]}',
                                fontsize=16)
 
+            elif include_all_inference and frame == len(self.weight_history) + 10:
+                # Show all digits inference summary
+                fig.suptitle('All Digits Inference Summary', fontsize=16)
+
+                # Clear and reorganize axes for summary
+                for ax in axes:
+                    ax.clear()
+                    ax.axis('off')
+
+                # Show all 10 digits in a grid
+                for digit in range(10):
+                    if digit in self.inference_states:
+                        row = digit // 5
+                        col = digit % 5
+                        if row < 2 and col < 3:  # Use available subplots
+                            ax_idx = row * 3 + col
+                            state = self.inference_states[digit]
+
+                            axes[ax_idx].imshow(state['input'].squeeze(), cmap='hot')
+                            pred = state['prediction']
+                            color = 'green' if pred == digit else 'red'
+                            axes[ax_idx].set_title(f'{digit}→{pred}', color=color, fontsize=10)
+                            axes[ax_idx].axis('on')
+
             return [im, line_loss, line_acc, im_fc1, im_fc2, im_fc3]
 
         frames_to_use = min(len(self.weight_history) + 10, max_frames)
+        if include_all_inference:
+            frames_to_use = min(len(self.weight_history) + 11, max_frames)
         anim = FuncAnimation(fig, animate, frames=frames_to_use,
                            interval=1000/fps, blit=True)
 
@@ -475,13 +674,29 @@ class WeightEvolutionVisualizer:
         return anim
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Visualize neural network weight evolution during training')
+    parser.add_argument('--all-digits', action='store_true', default=True,
+                       help='Create visualization showing inference for all digits 0-9 (default: True)')
+    parser.add_argument('--epochs', type=int, default=3,
+                       help='Number of epochs to train (default: 3)')
+    parser.add_argument('--record-every', type=int, default=5,
+                       help='Record weights every N steps (default: 5)')
+    parser.add_argument('--fps', type=int, default=10,
+                       help='Frames per second for GIF animation (default: 10)')
+    parser.add_argument('--max-frames', type=int, default=150,
+                       help='Maximum frames for GIF animation (default: 150)')
+
+    args = parser.parse_args()
+
     visualizer = WeightEvolutionVisualizer()
 
     print("Loading MNIST data...")
     visualizer.load_data()
 
-    print("\nStarting training with weight recording...")
-    visualizer.train_and_record(epochs=3, record_every=5)
+    print(f"\nStarting training with weight recording (epochs={args.epochs}, record_every={args.record_every})...")
+    visualizer.train_and_record(epochs=args.epochs, record_every=args.record_every)
 
     print("\nRecording inference states...")
     visualizer.record_inference()
@@ -490,13 +705,21 @@ def main():
     fig = visualizer.create_interactive_animation()
     plt.savefig('weight_evolution_interactive.png', dpi=100, bbox_inches='tight')
 
-    print("\nGenerating animated GIF...")
-    visualizer.create_gif('weight_evolution.gif', fps=10, max_frames=150)
+    if args.all_digits:
+        print("\nCreating all-digits inference visualization...")
+        visualizer.create_all_digits_inference_visualization('all_digits_inference.png')
+        print("- all_digits_inference.png (comprehensive inference visualization)")
+
+    print(f"\nGenerating animated GIF (fps={args.fps}, max_frames={args.max_frames})...")
+    visualizer.create_gif('weight_evolution.gif', fps=args.fps, max_frames=args.max_frames,
+                         include_all_inference=args.all_digits)
 
     print("\nVisualization complete!")
     print("Generated files:")
     print("- weight_evolution_interactive.png (interactive controls screenshot)")
     print("- weight_evolution.gif (animated GIF)")
+    if args.all_digits:
+        print("- all_digits_inference.png (all digits inference visualization)")
 
     plt.show()
 
