@@ -86,6 +86,55 @@ class WeightEvolutionVisualizer:
 
         return weights
 
+    def capture_specialization_snapshot(self):
+        """Capture neuron specialization for each digit at current training step"""
+        self.model.eval()
+
+        # Store digit-specific activations
+        digit_activations_layer1 = []
+        digit_activations_layer2 = []
+
+        with torch.no_grad():
+            for digit in range(10):
+                # Find samples of this digit
+                for data, target in self.test_loader:
+                    mask = target == digit
+                    if mask.any():
+                        sample = data[mask][0:1].to(self.device)
+
+                        # Get activations
+                        output = self.model(sample)
+
+                        layer1_act = self.model.activations['layer1'].cpu().numpy().flatten()
+                        layer2_act = self.model.activations['layer2'].cpu().numpy().flatten()
+
+                        digit_activations_layer1.append(layer1_act)
+                        digit_activations_layer2.append(layer2_act)
+                        break
+
+        self.model.train()
+
+        if len(digit_activations_layer1) == 10:
+            # Compute mean activations
+            layer1_array = np.array(digit_activations_layer1)
+            layer2_array = np.array(digit_activations_layer2)
+
+            # Compute differential activations (digit-specific - mean)
+            mean_layer1 = np.mean(layer1_array, axis=0)
+            mean_layer2 = np.mean(layer2_array, axis=0)
+
+            diff_layer1 = layer1_array - mean_layer1
+            diff_layer2 = layer2_array - mean_layer2
+
+            return {
+                'layer1_diff': diff_layer1,
+                'layer2_diff': diff_layer2,
+                'layer1_raw': layer1_array,
+                'layer2_raw': layer2_array
+            }
+
+        return None
+
     def weights_to_image(self, weights):
         all_weights = np.concatenate([
             weights['fc1'],
@@ -109,6 +158,9 @@ class WeightEvolutionVisualizer:
     def train_and_record(self, epochs=5, record_every=10):
         print("Training and recording weight evolution...")
         self.create_model()
+
+        # Initialize specialization history
+        self.specialization_history = []
 
         step = 0
         for epoch in range(epochs):
@@ -141,6 +193,15 @@ class WeightEvolutionVisualizer:
 
                     self.loss_history.append(loss.item())
                     self.accuracy_history.append(accuracy)
+
+                    # Capture specialization matrix at this step
+                    spec_matrix = self.capture_specialization_snapshot()
+                    if spec_matrix is not None:
+                        self.specialization_history.append({
+                            'step': step,
+                            'epoch': epoch,
+                            'matrix': spec_matrix
+                        })
 
                     print(f"Epoch {epoch}, Step {step}, Loss: {loss.item():.4f}, Acc: {accuracy:.3f}")
 
@@ -733,6 +794,168 @@ Avg Confidence: {np.mean(confidences):.2%}"""
 
         return fig
 
+    def create_specialization_evolution_gif(self, filename='specialization_evolution.gif', fps=5):
+        """Create animated GIF showing how neuron specialization evolves during training"""
+        print(f"Creating specialization evolution GIF: {filename}")
+
+        if not self.specialization_history:
+            print("No specialization history available. Run train_and_record() first.")
+            return None
+
+        fig = plt.figure(figsize=(20, 12))
+        gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
+
+        # Layer 1 specialization matrix
+        ax_layer1 = fig.add_subplot(gs[0, :2])
+        # Layer 2 specialization matrix
+        ax_layer2 = fig.add_subplot(gs[1, :2])
+        # Training progress
+        ax_progress = fig.add_subplot(gs[2, :2])
+        # Specialization strength over time
+        ax_strength = fig.add_subplot(gs[0, 2])
+        # Dominant digit histogram for layer 1
+        ax_hist1 = fig.add_subplot(gs[1, 2])
+        # Dominant digit histogram for layer 2
+        ax_hist2 = fig.add_subplot(gs[2, 2])
+
+        # Initialize plots
+        first_snapshot = self.specialization_history[0]
+        layer1_diff = first_snapshot['matrix']['layer1_diff']
+        layer2_diff = first_snapshot['matrix']['layer2_diff']
+
+        # Color scale
+        vmax1 = np.abs(layer1_diff).max()
+        vmax2 = np.abs(layer2_diff).max()
+
+        im1 = ax_layer1.imshow(layer1_diff, cmap='RdBu_r', vmin=-vmax1, vmax=vmax1, aspect='auto')
+        ax_layer1.set_title('Layer 1 Neuron Specialization', fontsize=12, fontweight='bold')
+        ax_layer1.set_xlabel('Neuron Index')
+        ax_layer1.set_ylabel('Digit')
+        ax_layer1.set_yticks(range(10))
+        plt.colorbar(im1, ax=ax_layer1, fraction=0.046)
+
+        im2 = ax_layer2.imshow(layer2_diff, cmap='RdBu_r', vmin=-vmax2, vmax=vmax2, aspect='auto')
+        ax_layer2.set_title('Layer 2 Neuron Specialization', fontsize=12, fontweight='bold')
+        ax_layer2.set_xlabel('Neuron Index')
+        ax_layer2.set_ylabel('Digit')
+        ax_layer2.set_yticks(range(10))
+        plt.colorbar(im2, ax=ax_layer2, fraction=0.046)
+
+        # Progress plot
+        line_loss, = ax_progress.plot([], [], 'cyan', linewidth=2, label='Loss')
+        ax_progress.set_xlim(0, len(self.loss_history))
+        ax_progress.set_ylim(0, max(self.loss_history) * 1.1)
+        ax_progress.set_xlabel('Training Step')
+        ax_progress.set_ylabel('Loss')
+        ax_progress.set_title('Training Progress')
+        ax_progress.grid(alpha=0.2)
+        ax_progress.legend()
+
+        # Strength plot
+        line_strength1, = ax_strength.plot([], [], 'cyan', linewidth=2, label='Layer 1')
+        line_strength2, = ax_strength.plot([], [], 'magenta', linewidth=2, label='Layer 2')
+        ax_strength.set_xlabel('Step')
+        ax_strength.set_ylabel('Specialization Strength')
+        ax_strength.set_title('Specialization Strength Over Time')
+        ax_strength.grid(alpha=0.2)
+        ax_strength.legend()
+
+        # Histograms
+        ax_hist1.set_title('Layer 1: Dominant Digits')
+        ax_hist1.set_xlabel('Digit')
+        ax_hist1.set_ylabel('Neuron Count')
+        ax_hist1.set_xticks(range(10))
+        ax_hist1.grid(alpha=0.2)
+
+        ax_hist2.set_title('Layer 2: Dominant Digits')
+        ax_hist2.set_xlabel('Digit')
+        ax_hist2.set_ylabel('Neuron Count')
+        ax_hist2.set_xticks(range(10))
+        ax_hist2.grid(alpha=0.2)
+
+        # Track specialization strength over time
+        strength1_history = []
+        strength2_history = []
+        steps_history = []
+
+        def animate(frame):
+            if frame >= len(self.specialization_history):
+                return [im1, im2, line_loss, line_strength1, line_strength2]
+
+            snapshot = self.specialization_history[frame]
+            step = snapshot['step']
+            epoch = snapshot['epoch']
+
+            layer1_diff = snapshot['matrix']['layer1_diff']
+            layer2_diff = snapshot['matrix']['layer2_diff']
+
+            # Update color scales dynamically
+            vmax1_frame = np.abs(layer1_diff).max()
+            vmax2_frame = np.abs(layer2_diff).max()
+
+            im1.set_data(layer1_diff)
+            im1.set_clim(-vmax1_frame, vmax1_frame)
+
+            im2.set_data(layer2_diff)
+            im2.set_clim(-vmax2_frame, vmax2_frame)
+
+            # Update title with step info
+            fig.suptitle(f'Neural Network Specialization Evolution - Epoch {epoch}, Step {step}',
+                        fontsize=16, fontweight='bold')
+
+            # Update progress line
+            loss_idx = min(step // (self.specialization_history[1]['step'] if len(self.specialization_history) > 1 else 1),
+                          len(self.loss_history) - 1)
+            line_loss.set_data(range(loss_idx + 1), self.loss_history[:loss_idx + 1])
+
+            # Calculate specialization strength
+            strength1 = np.std(layer1_diff)
+            strength2 = np.std(layer2_diff)
+
+            steps_history.append(step)
+            strength1_history.append(strength1)
+            strength2_history.append(strength2)
+
+            line_strength1.set_data(steps_history, strength1_history)
+            line_strength2.set_data(steps_history, strength2_history)
+
+            if strength1_history:
+                ax_strength.set_xlim(0, max(steps_history) * 1.1)
+                ax_strength.set_ylim(0, max(max(strength1_history), max(strength2_history)) * 1.2)
+
+            # Update histograms - which digit each neuron responds to most
+            layer1_dominant = np.argmax(np.abs(layer1_diff), axis=0)
+            layer2_dominant = np.argmax(np.abs(layer2_diff), axis=0)
+
+            ax_hist1.clear()
+            ax_hist1.hist(layer1_dominant, bins=np.arange(11) - 0.5, alpha=0.7, color='cyan', edgecolor='white')
+            ax_hist1.set_title('Layer 1: Dominant Digits')
+            ax_hist1.set_xlabel('Digit')
+            ax_hist1.set_ylabel('Neuron Count')
+            ax_hist1.set_xticks(range(10))
+            ax_hist1.grid(alpha=0.2)
+
+            ax_hist2.clear()
+            ax_hist2.hist(layer2_dominant, bins=np.arange(11) - 0.5, alpha=0.7, color='magenta', edgecolor='white')
+            ax_hist2.set_title('Layer 2: Dominant Digits')
+            ax_hist2.set_xlabel('Digit')
+            ax_hist2.set_ylabel('Neuron Count')
+            ax_hist2.set_xticks(range(10))
+            ax_hist2.grid(alpha=0.2)
+
+            return [im1, im2, line_loss, line_strength1, line_strength2]
+
+        anim = FuncAnimation(fig, animate, frames=len(self.specialization_history),
+                           interval=1000/fps, blit=False)
+
+        writer = PillowWriter(fps=fps)
+        anim.save(filename, writer=writer)
+
+        print(f"Specialization evolution GIF saved as {filename}")
+        plt.close(fig)
+
+        return anim
+
     def create_gif(self, filename='weight_evolution.gif', fps=10, max_frames=100, include_all_inference=False):
         print(f"Creating GIF animation: {filename}")
 
@@ -906,10 +1129,14 @@ def main():
     visualizer.create_gif('weight_evolution.gif', fps=args.fps, max_frames=args.max_frames,
                          include_all_inference=args.all_digits)
 
+    print("\nGenerating specialization evolution GIF...")
+    visualizer.create_specialization_evolution_gif('specialization_evolution.gif', fps=5)
+
     print("\nVisualization complete!")
     print("Generated files:")
     print("- weight_evolution_interactive.png (interactive controls screenshot)")
     print("- weight_evolution.gif (animated GIF)")
+    print("- specialization_evolution.gif (neuron specialization evolution GIF)")
     if args.all_digits:
         print("- all_digits_inference.png (all digits inference visualization)")
         print("- digit_activation_analysis.png (differential activation patterns)")
