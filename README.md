@@ -39,6 +39,22 @@ This creates:
 - Network architecture diagram
 - Activation correlation analysis
 
+### Advanced weight evolution animation
+```bash
+python weight_evolution_animation.py
+```
+
+This generates:
+- `weight_evolution_interactive.png` - Screenshot of interactive controls
+- `weight_evolution.gif` - Animated GIF showing weight evolution during training
+
+Features:
+- **Dual Mode Visualization**: Switch between training evolution and inference mode
+- **Interactive Controls**: Play/pause animation, frame-by-frame navigation with slider
+- **Weight Distribution Analysis**: Real-time histogram with mean/median statistics
+- **Inference Mode**: Visualize how the trained network processes individual digits (0-9)
+- **Multi-view Display**: Simultaneous view of all weights as pixels, layer-specific weights, loss curves, and accuracy metrics
+
 ## Network Architecture
 
 - Input: 784 neurons (28x28 flattened MNIST images)
